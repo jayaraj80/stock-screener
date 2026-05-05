@@ -1,16 +1,23 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import time
 from datetime import datetime
 
-# Force yfinance to use a browser-like header to avoid 403 errors on cloud
+# Setup browser-like session to prevent 403 errors on cloud servers
 import requests
 session = requests.Session()
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
 st.set_page_config(page_title="Stock Screener Pro", layout="wide")
+
+def calculate_rsi(data, window=14):
+    """Manual RSI calculation to avoid pandas-ta/numba dependencies."""
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 @st.cache_data(ttl=3600)
 def get_tickers(market_choice):
@@ -33,18 +40,22 @@ def run_screener(tickers, status_box, table_box, progress_bar):
         status_box.info(f"Scanning {i} to {min(i+batch_size, len(tickers))}...")
         
         try:
-            # Use the session with headers to avoid being blocked
-            data = yf.download(batch, period="1mo", interval="1d", group_by='ticker', silent=True, session=session)
+            data = yf.download(batch, period="2mo", interval="1d", group_by='ticker', silent=True, session=session)
             
             for ticker in batch:
                 try:
                     df = data[ticker] if len(batch) > 1 else data
-                    if df.empty or len(df) < 20: continue
+                    if df.empty or len(df) < 30: continue
                     
-                    vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
-                    rsi = ta.rsi(df['Close'], length=14).iloc[-1]
+                    # Volume Ratio calculation
+                    avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
+                    vol_ratio = df['Volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
                     
-                    if vol_ratio > 2 and rsi > 50:
+                    # Manual RSI calculation
+                    rsi_series = calculate_rsi(df['Close'])
+                    current_rsi = rsi_series.iloc[-1]
+                    
+                    if vol_ratio > 2 and current_rsi > 50:
                         t_obj = yf.Ticker(ticker, session=session)
                         info = t_obj.info
                         pe = info.get('trailingPE')
@@ -56,7 +67,7 @@ def run_screener(tickers, status_box, table_box, progress_bar):
                                 "Price": round(price, 2),
                                 "P/E": round(pe, 2),
                                 "Vol Ratio": round(vol_ratio, 2),
-                                "RSI": round(rsi, 2)
+                                "RSI": round(current_rsi, 2)
                             })
                             # Real-time ranked display
                             res_df = pd.DataFrame(results).sort_values(by="Vol Ratio", ascending=False)
@@ -70,6 +81,7 @@ def run_screener(tickers, status_box, table_box, progress_bar):
 
 st.title("📊 Alpha Market Screener")
 market = st.sidebar.radio("Market", ["Nifty 500 (NSE)", "S&P 500 (US)"])
+
 if st.sidebar.button("🚀 Start Full Scan"):
     all_tickers = get_tickers(market)
     if all_tickers:
